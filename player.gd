@@ -12,10 +12,17 @@ extends CharacterBody3D
 @onready var animation_player = $nek/head/eyes/AnimationPlayer
 
 # Gravedad dinámica
-var gravity: float = 7.8  # Gravedad base
+var gravity: float = 18.8  # Gravedad base
 var max_fall_speed: float = 200.0  # Velocidad máxima de caída
 var fall_time: float = 0.0  # Tiempo que llevas cayendo
 var fall_acceleration: float = 3.0  # Factor de aceleración de la caída
+
+# Física de caída rápida
+var ff_active: bool = false
+const ff_threshold = -20.0  # Posición en Y para activar la caída rápida
+const ff_gravity = 20.0  # Gravedad aumentada para la caída rápida
+const ff_max_speed = 500.0  # Velocidad máxima de caída rápida
+
 
 const jump_velocity = 9.0
 var is_jumping: bool = false
@@ -44,7 +51,10 @@ var crouching_depth = -0.5
 var direction = Vector3.ZERO
 var acceleration = 10.0  # Aceleración para suavizar el movimiento
 var max_air_speed = 100.0  # Velocidad máxima en el aire antes de reducir el control
-var air_control = 1.0  # Control en el aire (1 = completo)
+var air_control = 0.8  # Control en el aire (1 = completo)
+
+
+var current_state_name: String = "idle"  # Nombre del estado actual
 
 func _ready():
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -65,7 +75,28 @@ func change_state(new_state: Node) -> void:
 	previous_state = current_state
 	current_state = new_state
 	current_state.enter()
+	current_state_name = _get_state_name(new_state)
+	
 
+func _get_state_name(state: Node) -> String:
+	if state == idle_state:
+		return "idle"
+	elif state == walking_state:
+		return "walking"
+	elif state == sprinting_state:
+		return "sprinting"
+	elif state == crouching_state:
+		return "crouching"
+	elif state == sliding_state:
+		return "sliding"
+	elif state == jumping_state:
+		return "jumping"
+	elif state == falling_state:
+		return "falling"
+	else:
+		return "unknown"
+
+	
 func _input(event):
 	if event is InputEventMouseMotion:
 		# Rotar el jugador en el eje Y (izquierda/derecha)
@@ -76,66 +107,51 @@ func _input(event):
 		
 		# Limitar la rotación de la cámara para que no gire demasiado
 		head.rotation.x = clamp(head.rotation.x, deg_to_rad(-89), deg_to_rad(89))
-	if event.is_action_pressed("ui_accept") and is_on_floor():
-		jump_time = 0.0
-		is_jumping = true
-		change_state(jumping_state)
+	
 
 func _physics_process(delta: float) -> void:
 	var input_dir = Input.get_vector("left", "right", "forward", "backward")
-		# Calcular la dirección de movimiento basada en la cámara
-	var forward = -camera_3d.global_transform.basis.z
-	var right = camera_3d.global_transform.basis.x
-	direction = (forward * input_dir.y + right * input_dir.x).normalized()
+	
+	# Calcular la dirección de movimiento basada en la rotación del jugador
+	direction = Vector3(input_dir.x, 0, input_dir.y).normalized()
 
-	# Aplicar movimiento suavizado
-	var target_velocity = direction * current_speed
+	# Aplicar movimiento horizontal
 	if is_on_floor():
-		velocity.x = lerp(velocity.x, target_velocity.x, acceleration * delta)
-		velocity.z = lerp(velocity.z, target_velocity.z, acceleration * delta)
+		# Movimiento en el suelo
+		velocity.x = lerp(velocity.x, direction.x * current_speed, acceleration * delta)
+		velocity.z = lerp(velocity.z, direction.z * current_speed, acceleration * delta)
 	else:
-		# Control completo en el aire hasta alcanzar la velocidad máxima
-		var horizontal_speed = Vector2(velocity.x, velocity.z).length()
-		if horizontal_speed < max_air_speed:
-			velocity.x = lerp(velocity.x, target_velocity.x, air_control * delta)
-			velocity.z = lerp(velocity.z, target_velocity.z, air_control * delta)
-		else:
-			# Reducir el control si se supera la velocidad máxima
-			velocity.x = lerp(velocity.x, target_velocity.x, air_control * 0.5 * delta)
-			velocity.z = lerp(velocity.z, target_velocity.z, air_control * 0.5 * delta)
-	
-	
-	
-	
-	if is_jumping:
-		jump_time += delta
-		
-		# Aplicar una aceleración gradual durante el salto
-		velocity.y = jump_velocity * (1.0 - jump_time / 0.5)  # Ajusta el 0.5 para cambiar la duración del salto
-		
-		# Cambiar a falling_state si la velocidad en Y es menor o igual a 0
-		if velocity.y <= 0:
-			is_jumping = false
-			change_state(falling_state)
-	else:
-	
-	
-		if not is_on_floor():
-		# Incrementar el tiempo de caída
-			fall_time += delta
-		
-		# Calcular la velocidad de caída en función del tiempo
-			var target_fall_speed = min(gravity * fall_time * fall_acceleration, max_fall_speed)
-		
-		# Aplicar la velocidad de caída en el eje Y
-			velocity.y = -target_fall_speed
-		else:
-		# Reiniciar el tiempo de caída cuando tocas el suelo
-			fall_time = 0.0
-			is_jumping = false
-		
+		# Movimiento en el aire (control reducido)
+		velocity.x = lerp(velocity.x, direction.x * current_speed, air_control * delta)
+		velocity.z = lerp(velocity.z, direction.z * current_speed, air_control * delta)
 
+	# Aplicar gravedad normal o caída rápida
+	if not is_on_floor():
+		if global_transform.origin.y < ff_threshold or velocity.y < -ff_max_speed:
+			ff_active = true
+		else:
+			ff_active = false
+
+		if ff_active:
+			# Aplicar gravedad de caída rápida
+			velocity.y -= ff_gravity * delta
+			velocity.y = clamp(velocity.y, -ff_max_speed, jump_velocity)
+		else:
+			# Aplicar gravedad normal
+			velocity.y -= gravity * delta
+
+	# Manejar el salto
+	if Input.is_action_just_pressed("ui_accept") and is_on_floor():
+		velocity.y = jump_velocity
+		ff_active = false  # Desactivar la caída rápida al saltar
+
+	# Mover al jugador
 	# Manejar el estado actual
 	if current_state:
 		current_state.physics_update(delta)
 	move_and_slide()
+	
+	if Global.debug:
+		var horizontal_speed = Vector2(velocity.x, velocity.z).length()
+		var vertical_speed = velocity.y
+		Global.debug.update_debug_info(horizontal_speed, vertical_speed, current_state_name)
